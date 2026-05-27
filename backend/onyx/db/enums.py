@@ -369,6 +369,7 @@ class ExternalAppType(str, PyEnum):
     """
 
     GOOGLE_CALENDAR = "GOOGLE_CALENDAR"
+    GMAIL = "GMAIL"
     SLACK = "SLACK"
     LINEAR = "LINEAR"
     CUSTOM = "CUSTOM"

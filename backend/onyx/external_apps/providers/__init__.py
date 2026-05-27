@@ -4,6 +4,7 @@ from onyx.error_handling.error_codes import OnyxErrorCode
 from onyx.error_handling.exceptions import OnyxError
 from onyx.external_apps.providers.base import ExternalAppProvider
 from onyx.external_apps.providers.base import OrgCredentialField
+from onyx.external_apps.providers.gmail import GmailProvider
 from onyx.external_apps.providers.google_calendar import GoogleCalendarProvider
 from onyx.external_apps.providers.linear import LinearProvider
 from onyx.external_apps.providers.slack import SlackProvider
@@ -13,6 +14,7 @@ from onyx.server.features.build.api.models import OrgCredentialFieldDescriptor
 _PROVIDER_CLASSES: list[type[ExternalAppProvider]] = [
     SlackProvider,
     GoogleCalendarProvider,
+    GmailProvider,
     LinearProvider,
 ]
 
@@ -99,6 +101,7 @@ __all__ = [
     "ExternalAppProvider",
     "SlackProvider",
     "GoogleCalendarProvider",
+    "GmailProvider",
     "LinearProvider",
     "PROVIDERS",
     "get_provider_for_app",
