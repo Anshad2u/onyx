@@ -34,55 +34,16 @@ from onyx.sandbox_proxy.credential_injection import CredentialInjectionDispatche
 from onyx.sandbox_proxy.credential_injection import Injection
 from onyx.sandbox_proxy.credential_injection import INJECTION_HANDLED_FLAG
 from onyx.sandbox_proxy.credential_injection import InjectionOutcome
-from onyx.sandbox_proxy.identity import ResolvedSandbox
 from onyx.sandbox_proxy.identity import SessionContext
 from onyx.sandbox_proxy.snapshot_egress import SnapshotEgressPolicy
+from tests.unit.sandbox_proxy.conftest import FakeResolver as _FakeResolver
+from tests.unit.sandbox_proxy.conftest import make_flow as _flow
+from tests.unit.sandbox_proxy.conftest import make_resolved_sandbox as _sandbox
+from tests.unit.sandbox_proxy.conftest import StubResolver as _StubResolver
 
 # ---------------------------------------------------------------------------
 # Stubs
 # ---------------------------------------------------------------------------
-
-
-_SENTINEL = object()
-
-
-class _StubResolver:
-    """`SandboxResolver` Protocol stub with canned returns."""
-
-    def __init__(
-        self,
-        *,
-        sandbox: Any = _SENTINEL,
-        sandbox_exc: Exception | None = None,
-        session_by_id: Any = _SENTINEL,
-        session_by_id_exc: Exception | None = None,
-    ) -> None:
-        self._sandbox = sandbox
-        self._sandbox_exc = sandbox_exc
-        self._session_by_id = session_by_id
-        self._session_by_id_exc = session_by_id_exc
-        self.resolve_sandbox_calls = 0
-        self.resolve_session_by_id_calls: list[tuple[UUID, UUID, str]] = []
-
-    def resolve_sandbox(
-        self,
-        src_ip: str,  # noqa: ARG002
-    ) -> ResolvedSandbox | None:
-        self.resolve_sandbox_calls += 1
-        if self._sandbox_exc is not None:
-            raise self._sandbox_exc
-        return None if self._sandbox is _SENTINEL else self._sandbox  # type: ignore[no-any-return]
-
-    def resolve_session_by_id(
-        self,
-        session_id: UUID,
-        user_id: UUID,
-        tenant_id: str,
-    ) -> UUID | None:
-        self.resolve_session_by_id_calls.append((session_id, user_id, tenant_id))
-        if self._session_by_id_exc is not None:
-            raise self._session_by_id_exc
-        return None if self._session_by_id is _SENTINEL else self._session_by_id  # type: ignore[no-any-return]
 
 
 class _StubMatcher:
@@ -121,20 +82,6 @@ def _noop_cache_factory(tenant_id: str) -> Any:  # noqa: ARG001
     raise AssertionError("cache factory unexpectedly used")
 
 
-def _sandbox(
-    *,
-    user_id: UUID | None = None,
-    tenant_id: str = "public",
-) -> ResolvedSandbox:
-    return ResolvedSandbox(
-        sandbox_id=UUID("11111111-1111-1111-1111-111111111111"),
-        user_id=user_id if user_id is not None else uuid4(),
-        tenant_id=tenant_id,
-        sandbox_name="sandbox-aaaa1111",
-        sandbox_ip="10.0.0.1",
-    )
-
-
 def _ctx(
     *,
     tenant_id: str = "public",
@@ -149,38 +96,6 @@ def _ctx(
         sandbox_name="sandbox-aaaa1111",
         sandbox_ip="10.0.0.1",
     )
-
-
-def _flow(
-    *,
-    peername: tuple[str, int] | None = ("10.0.0.1", 12345),
-    raw_content: bytes | None = b"{}",
-    host: str = "slack.com",
-    port: int = 443,
-    method: str = "POST",
-    path_components: tuple[str, ...] = (),
-    conn_id: str = "conn-default",
-    proxy_auth: str | None = None,
-) -> http.HTTPFlow:
-    flow = MagicMock(spec=http.HTTPFlow)
-    flow.client_conn = MagicMock()
-    flow.client_conn.peername = peername
-    flow.client_conn.id = conn_id
-    flow.request = MagicMock()
-    flow.request.host = host
-    flow.request.port = port
-    flow.request.method = method
-    flow.request.path_components = path_components
-    flow.request.raw_content = raw_content
-    flow.request.stream = False
-    # Real dict (not MagicMock) so `.get(...)` returns None, not a truthy mock.
-    flow.request.headers = (
-        {"Proxy-Authorization": proxy_auth} if proxy_auth is not None else {}
-    )
-    flow.response = None
-    # Real dict (not MagicMock) so the snapshot-stream flag lookup isn't truthy.
-    flow.metadata = {}
-    return flow
 
 
 def _build(
@@ -631,22 +546,6 @@ async def test_requestheaders_noop_without_policy() -> None:
 # ---------------------------------------------------------------------------
 # requestheaders / request — credential injection
 # ---------------------------------------------------------------------------
-
-
-class _FakeResolver:
-    def __init__(self, *, host: str, injection: Injection | None) -> None:
-        self._host = host
-        self._injection = injection
-
-    def matches_host(self, host: str) -> bool:
-        return host == self._host
-
-    def resolve(
-        self,
-        request: http.Request,  # noqa: ARG002
-        identity: ResolvedSandbox,  # noqa: ARG002
-    ) -> Injection | None:
-        return self._injection
 
 
 def _injecting_addon(injection: Injection | None) -> GateAddon:
