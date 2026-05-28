@@ -49,7 +49,7 @@ import { ConnectorCredentialPairStatus } from "@/app/admin/connector/[ccPairId]/
 import Text from "@/refresh-components/texts/Text";
 import ConfirmationModalLayout from "@/refresh-components/layouts/ConfirmationModalLayout";
 import Modal, { BasicModalFooter } from "@/refresh-components/Modal";
-import Code from "@/refresh-components/Code";
+import { Code } from "@opal/components";
 import CopyIconButton from "@/refresh-components/buttons/CopyIconButton";
 import CharacterCount from "@/refresh-components/CharacterCount";
 import { InputPrompt } from "@/app/app/interfaces";

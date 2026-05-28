@@ -123,3 +123,6 @@ export {
 
 /* Spacer */
 export { Spacer, type SpacerProps } from "@opal/components/spacer/components";
+
+/* Code */
+export { Code } from "@opal/components/code/components";
