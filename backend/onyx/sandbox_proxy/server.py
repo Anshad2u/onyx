@@ -21,6 +21,8 @@ from onyx.sandbox_proxy.addons.gate import GateAddon
 from onyx.sandbox_proxy.ca import CABootstrap
 from onyx.sandbox_proxy.ca import MaterializedCA
 from onyx.sandbox_proxy.ca_k8s import K8sSecretCAStore
+from onyx.sandbox_proxy.credential_injection import build_resolvers
+from onyx.sandbox_proxy.credential_injection import CredentialInjectionDispatcher
 from onyx.sandbox_proxy.identity import IdentityResolver
 from onyx.sandbox_proxy.identity import SandboxIPLookup
 from onyx.sandbox_proxy.identity_k8s import K8sInformerLookup
@@ -217,6 +219,11 @@ def main() -> int:
                 snapshot_policy.bucket,
                 snapshot_policy.endpoint_host,
             )
+        resolvers = build_resolvers()
+        credential_injection = CredentialInjectionDispatcher(
+            resolvers=resolvers, identity=identity
+        )
+        logger.info("credential injection resolvers=%d", len(resolvers))
         gate = GateAddon(
             identity=identity,
             action_matcher=SlackPostMessageMatcher(),
@@ -226,6 +233,7 @@ def main() -> int:
             cache_factory=_build_cache_factory(),
             proxy_instance_id=proxy_instance_id,
             snapshot_policy=snapshot_policy,
+            credential_injection=credential_injection,
         )
 
         # DumpMaster binds to the running event loop in its constructor.

@@ -1,4 +1,3 @@
-import re
 from typing import Any
 from uuid import UUID
 from uuid import uuid4
@@ -13,20 +12,11 @@ from onyx.db.models import ExternalApp
 from onyx.db.models import ExternalAppUserCredential
 from onyx.error_handling.error_codes import OnyxErrorCode
 from onyx.error_handling.exceptions import OnyxError
+from onyx.external_apps.auth_template import placeholders_in_template
 from onyx.skills.built_in import EXTERNAL_APP_BUILT_IN_SKILL_IDS
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
-
-_PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
-
-
-def _placeholders_in_template(auth_template: dict[str, Any]) -> set[str]:
-    placeholders: set[str] = set()
-    for value in auth_template.values():
-        if isinstance(value, str):
-            placeholders.update(_PLACEHOLDER_RE.findall(value))
-    return placeholders
 
 
 def required_user_credential_keys(
@@ -37,7 +27,7 @@ def required_user_credential_keys(
     references in `auth_template` values not pre-filled by
     `organization_credentials`."""
     return sorted(
-        _placeholders_in_template(auth_template) - organization_credentials.keys()
+        placeholders_in_template(auth_template) - organization_credentials.keys()
     )
 
 

@@ -10,7 +10,6 @@ import binascii
 import json
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from typing import Protocol
 from uuid import UUID
 
 from mitmproxy import http
@@ -24,8 +23,13 @@ from onyx.db.notification import create_notification
 from onyx.sandbox_proxy import approval_cache
 from onyx.sandbox_proxy.action_matcher import ActionMatch
 from onyx.sandbox_proxy.action_matcher import ActionMatcher
+from onyx.sandbox_proxy.credential_injection import CredentialInjectionDispatcher
+from onyx.sandbox_proxy.credential_injection import INJECTION_HANDLED_FLAG
+from onyx.sandbox_proxy.credential_injection import InjectionOutcome
+from onyx.sandbox_proxy.identity import extract_src_ip
 from onyx.sandbox_proxy.identity import ResolvedSandbox
 from onyx.sandbox_proxy.identity import SessionContext
+from onyx.sandbox_proxy.identity import SessionResolver
 from onyx.sandbox_proxy.snapshot_egress import SnapshotEgressPolicy
 from onyx.server.features.build.db import action_approval
 from onyx.utils.logger import setup_logger
@@ -40,14 +44,6 @@ PARSER_MAX_BODY_BYTES = 1_048_576
 _SNAPSHOT_STREAM_FLAG = "onyx_snapshot_stream"
 
 
-class _Resolver(Protocol):
-    def resolve_sandbox(self, src_ip: str) -> ResolvedSandbox | None: ...
-
-    def resolve_session_by_id(
-        self, session_id: UUID, user_id: UUID, tenant_id: str
-    ) -> UUID | None: ...
-
-
 DBSessionFactory = Callable[[str], AbstractContextManager[Session]]
 CacheFactory = Callable[[str], CacheBackend]
 
@@ -59,6 +55,7 @@ _CODE_BODY_TOO_LARGE = "body_too_large"
 _CODE_USER_REJECTED = "user_rejected"
 _CODE_NOT_AUTHORIZED = "not_authorized"
 _CODE_INTERNAL_ERROR = "internal_error"
+_CODE_CREDENTIAL_UNAVAILABLE = "credential_unavailable"
 
 # Relative deep link routed through the Next router by NotificationsPopover.tsx;
 # must mirror the frontend's CRAFT_PATH + sessionId search param.
@@ -96,12 +93,13 @@ class GateAddon:
 
     def __init__(
         self,
-        identity: _Resolver,
+        identity: SessionResolver,
         action_matcher: ActionMatcher,
         db_session_factory: DBSessionFactory,
         cache_factory: CacheFactory,
         proxy_instance_id: str,
         snapshot_policy: SnapshotEgressPolicy | None = None,
+        credential_injection: CredentialInjectionDispatcher | None = None,
         stream_responses: bool = True,
     ) -> None:
         self._identity = identity
@@ -110,6 +108,7 @@ class GateAddon:
         self._cache_factory = cache_factory
         self._proxy_instance_id = proxy_instance_id
         self._snapshot_policy = snapshot_policy
+        self._credential_injection = credential_injection
         self._stream_responses = stream_responses
         # Invariant: `_persist_approval_row` is the only writer;
         # `_await_decision`'s finally is the only remover.
@@ -159,29 +158,39 @@ class GateAddon:
             flow.response.stream = True
 
     async def requestheaders(self, flow: http.HTTPFlow) -> None:
-        """Opt a tenant-scoped snapshot upload into unbuffered streaming.
+        """Run the pre-body hooks: snapshot streaming, then credential injection.
 
         Must run here, not in `request`: mitmproxy only honors
-        `flow.request.stream = True` before the body is read. Anything not
-        confirmed as the resolving tenant's snapshot egress falls through to
+        `flow.request.stream = True` and lets injection rewrite headers before
+        the body is read.
+        """
+        if self._maybe_stream_snapshot(flow):
+            return
+        self._maybe_inject_credentials(flow)
+
+    def _maybe_stream_snapshot(self, flow: http.HTTPFlow) -> bool:
+        """Opt a tenant-scoped snapshot upload into unbuffered streaming.
+
+        Returns True if the flow was opted in. Anything not confirmed as the
+        resolving tenant's snapshot egress returns False and falls through to
         `request`'s normal cap + matcher path.
         """
         policy = self._snapshot_policy
         if policy is None:
-            return
+            return False
         if not policy.host_matches(flow.request.host):
-            return
+            return False
 
-        src_ip = self._extract_src_ip(flow)
+        src_ip = extract_src_ip(flow)
         if src_ip is None:
-            return
+            return False
         try:
             sandbox = self._identity.resolve_sandbox(src_ip)
         except Exception:
             # Let `request` re-resolve and fail closed on the DB error.
-            return
+            return False
         if sandbox is None:
-            return
+            return False
 
         if not policy.should_stream(
             host=flow.request.host,
@@ -189,7 +198,7 @@ class GateAddon:
             path_components=tuple(flow.request.path_components),
             tenant_id=sandbox.tenant_id,
         ):
-            return
+            return False
 
         flow.request.stream = True
         flow.metadata[_SNAPSHOT_STREAM_FLAG] = True
@@ -200,6 +209,29 @@ class GateAddon:
             flow.request.host,
             flow.request.method,
         )
+        return True
+
+    def _maybe_inject_credentials(self, flow: http.HTTPFlow) -> None:
+        """Inject a brokered credential, or fail closed if its host is owned but
+        the secret can't be resolved.
+
+        `apply` is written never to raise; the guard enforces that structurally
+        so a future bug can't let an owned host egress un-credentialed.
+        """
+        dispatcher = self._credential_injection
+        if dispatcher is None:
+            return
+        try:
+            outcome = dispatcher.apply(flow)
+        except Exception:
+            logger.exception(
+                "gate.injection_unhandled_error host=%s", flow.request.host
+            )
+            flow.metadata[INJECTION_HANDLED_FLAG] = True
+            flow.response = _http_403(_CODE_CREDENTIAL_UNAVAILABLE)
+            return
+        if outcome is InjectionOutcome.BLOCKED:
+            flow.response = _http_403(_CODE_CREDENTIAL_UNAVAILABLE)
 
     async def request(self, flow: http.HTTPFlow) -> None:
         task = asyncio.current_task()
@@ -209,6 +241,12 @@ class GateAddon:
 
         if flow.metadata.get(_SNAPSHOT_STREAM_FLAG):
             # Already validated in `requestheaders`; body is streaming.
+            return
+
+        if flow.metadata.get(INJECTION_HANDLED_FLAG):
+            # Injection (or its fail-closed block) handled this in
+            # `requestheaders`. Strip the session tag and skip gating.
+            flow.request.headers.pop("Proxy-Authorization", None)
             return
 
         gate_target = self._resolve_and_match(flow)
@@ -259,7 +297,7 @@ class GateAddon:
         Session resolution is LAST: only gated actions need a session tag;
         non-gated traffic (npm, apt, pip) is identified at the pod level.
         """
-        src_ip = self._extract_src_ip(flow)
+        src_ip = extract_src_ip(flow)
         if src_ip is None:
             flow.response = _http_403(_CODE_UNIDENTIFIED_SANDBOX)
             return None
@@ -592,15 +630,6 @@ class GateAddon:
     # ------------------------------------------------------------------
     # internal helpers
     # ------------------------------------------------------------------
-
-    def _extract_src_ip(self, flow: http.HTTPFlow) -> str | None:
-        peer = flow.client_conn.peername
-        if peer is None or len(peer) < 1:
-            return None
-        addr = peer[0]
-        if not isinstance(addr, str):
-            return None
-        return addr
 
     def _resolve_gated_session(
         self, flow: http.HTTPFlow, sandbox: ResolvedSandbox

@@ -1,6 +1,6 @@
 """Unit tests for the GateAddon mitmproxy addon.
 
-External dependencies (`_Resolver`, `ActionMatcher`, `CacheFactory`,
+External dependencies (`SandboxResolver`, `ActionMatcher`, `CacheFactory`,
 `DBSessionFactory`) are stubbed via small Protocol implementations.
 
 The race arbiter (`_claim_expired_or_read_winner`) is covered against a
@@ -30,6 +30,10 @@ from onyx.sandbox_proxy.addons import gate as gate_mod
 from onyx.sandbox_proxy.addons.gate import GateAddon
 from onyx.sandbox_proxy.addons.gate import ParkedApprovals
 from onyx.sandbox_proxy.addons.gate import PARSER_MAX_BODY_BYTES
+from onyx.sandbox_proxy.credential_injection import CredentialInjectionDispatcher
+from onyx.sandbox_proxy.credential_injection import Injection
+from onyx.sandbox_proxy.credential_injection import INJECTION_HANDLED_FLAG
+from onyx.sandbox_proxy.credential_injection import InjectionOutcome
 from onyx.sandbox_proxy.identity import ResolvedSandbox
 from onyx.sandbox_proxy.identity import SessionContext
 from onyx.sandbox_proxy.snapshot_egress import SnapshotEgressPolicy
@@ -43,7 +47,7 @@ _SENTINEL = object()
 
 
 class _StubResolver:
-    """`_Resolver` Protocol stub with canned returns."""
+    """`SandboxResolver` Protocol stub with canned returns."""
 
     def __init__(
         self,
@@ -622,6 +626,114 @@ async def test_requestheaders_noop_without_policy() -> None:
     assert flow.request.stream is False
     assert gate_mod._SNAPSHOT_STREAM_FLAG not in flow.metadata
     assert resolver.resolve_sandbox_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# requestheaders / request — credential injection
+# ---------------------------------------------------------------------------
+
+
+class _FakeResolver:
+    def __init__(self, *, host: str, injection: Injection | None) -> None:
+        self._host = host
+        self._injection = injection
+
+    def matches_host(self, host: str) -> bool:
+        return host == self._host
+
+    def resolve(
+        self,
+        request: http.Request,  # noqa: ARG002
+        identity: ResolvedSandbox,  # noqa: ARG002
+    ) -> Injection | None:
+        return self._injection
+
+
+def _injecting_addon(injection: Injection | None) -> GateAddon:
+    resolver = _StubResolver(sandbox=_sandbox(tenant_id="tenant_acme"))
+    addon = _build(resolver=resolver, matcher=_StubMatcher(result=_MATCH))
+    addon._credential_injection = CredentialInjectionDispatcher(
+        resolvers=[_FakeResolver(host="api.openai.com", injection=injection)],
+        identity=resolver,
+    )
+    return addon
+
+
+@pytest.mark.asyncio
+async def test_requestheaders_injects_credential() -> None:
+    addon = _injecting_addon(Injection(headers={"Authorization": "Bearer real"}))
+    flow = _flow(host="api.openai.com")
+    flow.request.headers["Authorization"] = "Bearer placeholder"
+
+    await addon.requestheaders(flow)
+
+    assert flow.request.headers["Authorization"] == "Bearer real"
+    assert flow.metadata[INJECTION_HANDLED_FLAG] is True
+    assert flow.response is None
+
+
+@pytest.mark.asyncio
+async def test_requestheaders_block_sets_credential_unavailable_403() -> None:
+    addon = _injecting_addon(None)  # resolver owns the host but yields nothing
+    flow = _flow(host="api.openai.com")
+
+    await addon.requestheaders(flow)
+
+    _assert_403(flow, gate_mod._CODE_CREDENTIAL_UNAVAILABLE)
+    assert flow.metadata[INJECTION_HANDLED_FLAG] is True
+
+
+@pytest.mark.asyncio
+async def test_request_skips_gating_for_injected_flow() -> None:
+    resolver = _StubResolver(sandbox=_sandbox())
+    matcher = _StubMatcher(result=_MATCH)
+    addon = _build(resolver=resolver, matcher=matcher)
+    flow = _flow(host="api.openai.com", proxy_auth=_basic_auth(_TAG_UUID))
+    flow.metadata[INJECTION_HANDLED_FLAG] = True
+
+    await addon.request(flow)
+
+    assert flow.response is None  # forwarded
+    assert "Proxy-Authorization" not in flow.request.headers
+    assert matcher.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_request_preserves_blocked_403_and_skips_gating() -> None:
+    """A BLOCKED flow (flag + 403 set in requestheaders) survives `request`
+    unchanged, with gating skipped and the session tag stripped."""
+    matcher = _StubMatcher(result=_MATCH)
+    addon = _build(resolver=_StubResolver(sandbox=_sandbox()), matcher=matcher)
+    flow = _flow(host="api.openai.com", proxy_auth=_basic_auth(_TAG_UUID))
+    flow.metadata[INJECTION_HANDLED_FLAG] = True
+    flow.response = gate_mod._http_403(gate_mod._CODE_CREDENTIAL_UNAVAILABLE)
+
+    await addon.request(flow)
+
+    _assert_403(flow, gate_mod._CODE_CREDENTIAL_UNAVAILABLE)
+    assert matcher.calls == 0
+    assert "Proxy-Authorization" not in flow.request.headers
+
+
+@pytest.mark.asyncio
+async def test_requestheaders_injection_unhandled_error_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If `apply` ever raises, the gate fails closed (403 + flag) rather than
+    letting the owned host egress un-credentialed."""
+    addon = _injecting_addon(Injection(headers={"Authorization": "x"}))
+
+    def _boom(_flow: http.HTTPFlow) -> InjectionOutcome:
+        raise RuntimeError("boom")
+
+    assert addon._credential_injection is not None
+    monkeypatch.setattr(addon._credential_injection, "apply", _boom)
+    flow = _flow(host="api.openai.com")
+
+    await addon.requestheaders(flow)
+
+    _assert_403(flow, gate_mod._CODE_CREDENTIAL_UNAVAILABLE)
+    assert flow.metadata[INJECTION_HANDLED_FLAG] is True
 
 
 # ---------------------------------------------------------------------------

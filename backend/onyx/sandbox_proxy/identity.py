@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
+from mitmproxy import http
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -29,6 +30,17 @@ from onyx.db.models import Sandbox
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
+
+
+def extract_src_ip(flow: http.HTTPFlow) -> str | None:
+    """The client peer IP of a flow, or None if unavailable."""
+    peer = flow.client_conn.peername
+    if peer is None or len(peer) < 1:
+        return None
+    addr = peer[0]
+    if not isinstance(addr, str):
+        return None
+    return addr
 
 
 @dataclass(frozen=True)
@@ -91,6 +103,21 @@ class SandboxIPLookup(Protocol):
 
 
 DBSessionFactory = Callable[[str], AbstractContextManager[Session]]
+
+
+class SandboxResolver(Protocol):
+    """Resolves a sandbox identity from a source IP — what credential injection
+    needs."""
+
+    def resolve_sandbox(self, src_ip: str) -> ResolvedSandbox | None: ...
+
+
+class SessionResolver(SandboxResolver, Protocol):
+    """Adds in-band session-tag validation — what the gate additionally needs."""
+
+    def resolve_session_by_id(
+        self, session_id: UUID, user_id: UUID, tenant_id: str
+    ) -> UUID | None: ...
 
 
 def _default_session_factory(tenant_id: str) -> AbstractContextManager[Session]:
