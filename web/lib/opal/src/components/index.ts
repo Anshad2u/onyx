@@ -123,3 +123,9 @@ export {
 
 /* Spacer */
 export { Spacer, type SpacerProps } from "@opal/components/spacer/components";
+
+/* CopyButton */
+export {
+  CopyButton,
+  type CopyButtonProps,
+} from "@opal/components/buttons/copy-button/components";

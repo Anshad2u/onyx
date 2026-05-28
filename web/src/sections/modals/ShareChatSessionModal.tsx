@@ -9,7 +9,7 @@ import { Section } from "@/layouts/general-layouts";
 import Modal from "@/refresh-components/Modal";
 import { Button, SelectCard } from "@opal/components";
 import { ContentAction } from "@opal/layouts";
-import CopyIconButton from "@/refresh-components/buttons/CopyIconButton";
+import { CopyButton } from "@opal/components";
 import InputTypeIn from "@/refresh-components/inputs/InputTypeIn";
 import { SvgLink, SvgShare, SvgUsers } from "@opal/icons";
 import SvgCheck from "@opal/icons/check";
@@ -208,7 +208,7 @@ export default function ShareChatSessionModal({
               readOnly
               value={shareLink}
               rightSection={
-                <CopyIconButton
+                <CopyButton
                   getCopyText={() => shareLink}
                   tooltip="Copy link"
                   size="sm"
