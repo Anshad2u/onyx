@@ -7,10 +7,8 @@ import { useChatSessionStore } from "@/app/app/stores/useChatSessionStore";
 import { copyAll } from "@/app/app/message/copyingUtils";
 import { Section } from "@/layouts/general-layouts";
 import Modal from "@/refresh-components/Modal";
-import { Button, SelectCard } from "@opal/components";
+import { Button, CopyButton, InputTypeIn, SelectCard } from "@opal/components";
 import { ContentAction } from "@opal/layouts";
-import { CopyButton } from "@opal/components";
-import InputTypeIn from "@/refresh-components/inputs/InputTypeIn";
 import { SvgLink, SvgShare, SvgUsers } from "@opal/icons";
 import SvgCheck from "@opal/icons/check";
 import SvgLock from "@opal/icons/lock";
@@ -205,9 +203,9 @@ export default function ShareChatSessionModal({
           {isShared && (
             <InputTypeIn
               aria-label="share-modal-link-input"
-              readOnly
+              variant="readOnly"
               value={shareLink}
-              rightSection={
+              rightChildren={
                 <CopyButton
                   getCopyText={() => shareLink}
                   tooltip="Copy link"
